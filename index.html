@@ -369,10 +369,10 @@
   <span class="period-label">Period</span>
   <button class="period-btn" onclick="loadPeriod('today')">Today</button>
   <button class="period-btn" onclick="loadPeriod('week')">This Week</button>
-  <button class="period-btn active" onclick="loadPeriod('month')">This Month</button>
+  <button class="period-btn" onclick="loadPeriod('month')">This Month</button>
   <div class="separator"></div>
   <button class="period-btn" onclick="loadPeriod('2026-01')">Jan</button>
-  <button class="period-btn" onclick="loadPeriod('2026-02')">Feb</button>
+  <button class="period-btn active" onclick="loadPeriod('2026-02')">Feb</button>
   <button class="period-btn" onclick="loadPeriod('2026-03')">Mar</button>
   <div class="separator"></div>
   <input type="date" class="period-date-input" id="date-picker" onchange="loadSpecificDate(this.value)">
@@ -481,13 +481,21 @@ controls.autoRotateSpeed = 0.4;
 controls.enableDamping = true;
 controls.dampingFactor = 0.1;
 
-globe.pointOfView({ lat: 20, lng: 10, altitude: 2.2 });
+globe.pointOfView({ lat: 25, lng: 140, altitude: 2.2 });
 
 /* ═══════════════════════════════════════
    Data & state
    ═══════════════════════════════════════ */
 let allPoints = [];
-let currentPeriod = 'month';
+let currentPeriod = '2026-02';
+
+// ── Dawn reveal state ──
+let _revealPool = [];        // sorted points waiting to be revealed
+let _revealIndex = 0;        // current position in reveal pool
+let _revealActive = false;   // whether reveal is in progress
+let _lastReveal = 0;         // timestamp of last reveal batch
+const REVEAL_BATCH = 60;     // points per reveal batch
+const REVEAL_INTERVAL = 60;  // ms between batches (~1000 pts/sec)
 
 // Returns RGB components for soft white light with subtle tint
 function pointColorRGB(kingdom) {
@@ -574,6 +582,9 @@ async function fetchData(period) {
   const myFetchId = ++_fetchId;
   showLoading(true);
   allPoints = [];
+  _revealPool = [];
+  _revealIndex = 0;
+  _revealActive = false;
   _mergeMode = false;
   globe.pointsMerge(false);
   globe.pointsData([]);
@@ -606,22 +617,31 @@ async function fetchData(period) {
     const allResults = await Promise.all(promises);
     if (myFetchId !== _fetchId) return;
 
-    let grandTotal = 0;
-    for (const { country, total, results } of allResults) {
-      grandTotal += total;
-      if (results.length > 0) {
-        allPoints.push(...results.map((r, j) => mapRecord(r, allPoints.length + j)));
+    // Map all results to points
+    let allFetched = [];
+    for (const { results } of allResults) {
+      for (const r of results) {
+        allFetched.push(mapRecord(r, allFetched.length));
       }
     }
 
-    globe.pointsData(allPoints);
-    updateStats();
+    // Sort by longitude descending (east→west: Japan→Asia→Europe→Americas)
+    allFetched.sort((a, b) => b.lng - a.lng);
 
-    const countryCount = new Set(allPoints.map(p => p.country)).size;
-    document.getElementById('record-count').innerHTML =
-      `<strong>${allPoints.length.toLocaleString()}</strong> observations · ${countryCount} countries`;
+    // Start dawn reveal animation
+    _revealPool = allFetched;
+    _revealIndex = 0;
+    _revealActive = true;
+    allPoints = [];
 
-    console.log(`[GBIF] Done: ${allPoints.length} points from ${countryCount} countries`);
+    // Slow rotation during reveal
+    controls.autoRotateSpeed = 0.15;
+
+    // Point camera toward Japan to see the dawn begin
+    globe.pointOfView({ lat: 25, lng: 140, altitude: 2.2 }, 1500);
+
+    const countryCount = new Set(allFetched.map(p => p.country)).size;
+    console.log(`[Dawn] ${allFetched.length} points ready, revealing east→west across ${countryCount} countries`);
 
   } catch(e) {
     console.error('[GBIF] Fetch error:', e);
@@ -757,15 +777,37 @@ function breathe(ts) {
   requestAnimationFrame(breathe);
   _now = ts / 1000;
 
-  // Switch to merge mode when points get heavy (much faster rendering)
+  // ── Dawn reveal: add points gradually (east→west) ──
+  if (_revealActive && ts - _lastReveal > REVEAL_INTERVAL) {
+    _lastReveal = ts;
+    const end = Math.min(_revealIndex + REVEAL_BATCH, _revealPool.length);
+    for (let i = _revealIndex; i < end; i++) {
+      allPoints.push(_revealPool[i]);
+    }
+    _revealIndex = end;
+
+    // Update stats and count live during reveal
+    updateStats();
+    const countryCount = new Set(allPoints.map(p => p.country)).size;
+    document.getElementById('record-count').innerHTML =
+      `<strong>${allPoints.length.toLocaleString()}</strong> / ${_revealPool.length.toLocaleString()} observations · ${countryCount} countries`;
+
+    if (_revealIndex >= _revealPool.length) {
+      _revealActive = false;
+      controls.autoRotateSpeed = 0.4;
+      document.getElementById('record-count').innerHTML =
+        `<strong>${allPoints.length.toLocaleString()}</strong> observations · ${countryCount} countries`;
+      console.log('[Dawn] Reveal complete:', allPoints.length, 'points');
+    }
+  }
+
+  // Switch to merge mode when points get heavy
   if (!_mergeMode && allPoints.length > 2000) {
     _mergeMode = true;
     globe.pointsMerge(true);
-    console.log('[Perf] Switched to merge mode at', allPoints.length, 'points');
   }
 
-  // In merge mode: update less frequently (merge rebuild is cheaper but still costs)
-  // In individual mode: update for breathing animation
+  // Breathing animation
   const interval = _mergeMode ? 500 : (allPoints.length > 1000 ? 200 : 150);
   if (ts - _lastPulse > interval) {
     _lastPulse = ts;
@@ -779,7 +821,7 @@ requestAnimationFrame(breathe);
 /* ═══════════════════════════════════════
    Init — load this month's data
    ═══════════════════════════════════════ */
-loadPeriod('month');
+loadPeriod('2026-02');
 </script>
 </body>
 </html>
